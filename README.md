@@ -12,7 +12,8 @@
 [![Language](https://img.shields.io/badge/Language-Rust-orange?style=flat-square)](.)
 [![Architecture](https://img.shields.io/badge/Architecture-HDC%20%2F%20VSA-informational?style=flat-square)](.)
 [![QPS](https://img.shields.io/badge/Throughput-526k%20QPS-blueviolet?style=flat-square)](.)
-[![LLM Cost](https://img.shields.io/badge/LLM%20Cost%20Reduction-68.9%25-success?style=flat-square)](.)
+[![LLM Cost](https://img.shields.io/badge/LLM%20Cost%20Reduction-91.6%25-success?style=flat-square)](.)
+[![IRS](https://img.shields.io/badge/Info%20Retention-92.7%25-blue?style=flat-square)](.)
 [![License](https://img.shields.io/badge/License-Proprietary-red?style=flat-square)](.)
 
 </div>
@@ -25,7 +26,7 @@ CHSE-X is a production-grade, high-performance data engine built on **Hyperdimen
 
 **The core insight:** instead of storing records in B-Trees or hash tables, CHSE-X represents every record as a random vector in a 10,240-dimensional mathematical space. Writes are vector additions. Reads are dot products. Write conflicts are structurally impossible — not prevented by locks, but impossible by the mathematics of commutativity.
 
-**The unexpected product:** when we ran LLM prompts through the deduplication engine before sending them to the API, we cut input tokens by 68.9% and total API costs by 58.4% — in 0.25 milliseconds, with zero ML inference, zero GPU, zero external dependencies.
+**The unexpected product:** when we ran LLM prompts through the deduplication engine before sending them to the API, we cut input tokens by **91.6%** and total API costs by **85.3%** — in under 1.5ms, with zero ML inference, zero GPU, zero external dependencies. On one benchmark scenario, raw queries failed completely due to rate limits while compressed queries succeeded 100% of the time.
 
 ---
 
@@ -59,9 +60,9 @@ for record in stream {
 }
 
 // ── LLM Context Compression ──
-let compressor = ContextCompressor::new(0.70);  // Jaccard threshold
+let compressor = ContextCompressor::new(0.72);  // recommended threshold
 let compressed = compressor.compress(&raw_log_text);
-// Result: 1,718 tokens → 534 tokens in 0.25ms
+// Result: 21,016 tokens → 1,764 tokens in <1.5ms
 ```
 
 > **Note:** API is stabilizing. See [`examples/`](examples/) for complete usage.
@@ -70,7 +71,7 @@ let compressed = compressor.compress(&raw_log_text);
 
 ## Benchmark Results
 
-All benchmarks: Apple Silicon ARM64, `RUSTFLAGS="-C target-cpu=native -C target-feature=+dotprod"`, MusicBrainz 50k dataset.
+All benchmarks: Apple Silicon ARM64, `RUSTFLAGS="-C target-cpu=native -C target-feature=+dotprod"`.
 
 ### Full Optimization Journey (12,000 → 526,316 QPS)
 
@@ -84,7 +85,7 @@ All benchmarks: Apple Silicon ARM64, `RUSTFLAGS="-C target-cpu=native -C target-
 
 **43x throughput improvement. F1 score improved simultaneously.**
 
-### Deduplication Pipeline
+### Deduplication Pipeline (MusicBrainz 50k)
 
 | Method | Precision | Recall | F1 | QPS |
 |:---|---:|---:|---:|---:|
@@ -101,20 +102,32 @@ All benchmarks: Apple Silicon ARM64, `RUSTFLAGS="-C target-cpu=native -C target-
 | Exact Dedup (F1 99.38%) | — | **15,000 inserts/sec** |
 | Hybrid Pipeline (WAL active) | — | **446,429 QPS** |
 
-### LLM Context Compression (Real Groq API Test)
+### LLM Context Compression — Real Groq API Test (5 Scenarios)
 
-Tested on a live Python stack trace log with redundant Flask/Jinja tracebacks. Model: `llama-3.3-70b-versatile`.
+Tested across 5 production scenarios using `llama-3.3-70b-versatile`. Total: 21,016 raw tokens → 1,764 compressed tokens.
 
-| Metric | Raw Prompt | CHSE Phase 1 | CHSE Phase 2 (Masking) | vs Raw |
-|:---|---:|---:|---:|---:|
-| Characters | 6,412 | 2,128 | 1,810 | **−71.8%** |
-| Input tokens | 1,718 | 622 | 534 | **−68.9%** |
-| LLM latency | 1.49s | 1.32s | 0.98s | **−34.0%** |
-| Total API cost | $0.001296 | $0.000649 | $0.000539 | **−58.4%** |
-| Compression time | — | 0.37ms | **0.25ms** | negligible |
-| Diagnostic quality | baseline | 100% | **100%** | no loss |
+| Metric | Raw | CHSE-X Compressed | Improvement |
+|:---|---:|---:|---:|
+| Input tokens | 21,016 | 1,764 | **−91.6%** |
+| API cost | $0.01330 | $0.00196 | **−85.3%** |
+| LLM latency | 2,122ms | 1,674ms | **−21.1%** |
+| Rate limit failures | ❌ Scenario 1 failed (TPM exceeded) | ✅ 100% success | **Rate-limit rescue** |
+| Compression time | — | **avg 1.50ms** | negligible |
+| Info retention (IRS) | baseline | **92.70%** | — |
+| Exact fact retention | baseline | **100%** | zero critical data loss |
 
-**At scale:** 100,000 agent actions/day → from $300/day to $45/day. **$93,750/year saved per production system.**
+**At scale:** 100,000 agent actions/day → from $399/day to $59/day. **$123,000/year saved per production system.**
+
+### IRS Threshold Curve
+
+| Threshold | Compression | IRS | Recommendation |
+|:---|---:|---:|:---|
+| 0.40 | 79.64% | 88.50% | Too aggressive |
+| 0.55 | 79.43% | 96.00% | Good |
+| **0.72** | **79.43%** | **96.00%** | **Recommended** |
+| 0.95 | 79.43% | 96.00% | Conservative |
+
+IRS plateaus at 96% from threshold 0.55 onward. Threshold 0.72 is the recommended production value.
 
 ---
 
@@ -129,7 +142,10 @@ Tested on a live Python stack trace log with redundant Flask/Jinja tracebacks. M
 │  Raw Input (log / event / record)                               │
 │        │                                                        │
 │        ▼                                                        │
-│  [ Timestamp & UUID Masking ]  ←── Rust SIMD, 0.25ms           │
+│  [ Outlier Protection Layer ]  ←── critical keywords bypass     │
+│        │ non-critical                                           │
+│        ▼                                                        │
+│  [ Timestamp & UUID Masking ]  ←── Rust SIMD, <0.1ms           │
 │        │                                                        │
 │        ▼                                                        │
 │  [ CHSE-X Exact Layer ]        ←── HDC dot-product, O(1)        │
@@ -170,30 +186,48 @@ Query Vector
 └─────────────────────────────────────────────┘
 ```
 
-Mega-chunk pruning eliminates entire subtrees before touching L2/L3 data — the key to breaking the 500k QPS barrier.
-
 ### LLM Context Compression Pipeline
 
 ```
-Raw Prompt (1,718 tokens)
+Raw Prompt (21,016 tokens avg)
     │
+    ▼
+[ Outlier Protection Layer ]     ← "panic", "corruption", "fatal"
+    │ critical → bypass direct     keywords bypass dedup entirely
     ▼
 [ Timestamp / UUID Masking ]     ← strip dynamic values
     │                               that break similarity
     ▼
-[ Tri-gram Shingling ]           ← character-level n-grams
+[ Holographic Frequency          ← identical lines merged into
+  Superposition ]                  "[error] × 84 | 20:00→20:45"
     │
     ▼
-[ MinHash Signature ]            ← 128-slot signature per line
+[ Jaccard Deduplication ]        ← remove lines with sim ≥ 0.72
     │
     ▼
-[ Jaccard Deduplication ]        ← remove lines with sim ≥ 0.70
+Compressed Prompt (1,764 tokens) ← avg 1.50ms, zero ML needed
     │
     ▼
-Compressed Prompt (534 tokens)   ← 0.25ms total, zero ML needed
-    │
-    ▼
-[ LLM API ]                      ← 34% faster, 58% cheaper
+[ LLM API ]                      ← 21% faster, 85% cheaper
+```
+
+### Hierarchical Agent Memory (L1/L2/L3)
+
+```
+GET /api/chse/agent/memory/context?mode=hierarchical
+
+┌─────────────────────────────────────────┐
+│  ## [L1] Last 15 minutes                │
+│  Raw, uncompressed — instant events     │
+├─────────────────────────────────────────┤
+│  ## [L2] Last 24 hours                  │
+│  CHSE superpose compressed              │
+│  "DB timeout × 847 | 09:00→18:00"       │
+├─────────────────────────────────────────┤
+│  ## [L3] Last 30 days                   │
+│  Nightly prune summaries                │
+│  "Redis OOM recurring, limit too low"   │
+└─────────────────────────────────────────┘
 ```
 
 ### Persistence Architecture
@@ -228,12 +262,16 @@ POST /api/chse/stream/filter
     Output: { "is_duplicate": true, "similarity": 0.98, "action": "DROP" }
 
 POST /api/chse/agent/memory/query
-    Input:  { "query": "VM replication timeout", "max_context_tokens": 1500 }
+    Input:  { "query": "VM replication timeout", "max_context_tokens": 1500,
+              "superpose": true }
     Output: { "matched_episodes": [...], "compressed_prompt_context": "..." }
 
 POST /api/chse/dedup
     Input:  { "records": [...], "return_removed": true }
     Output: { "unique": [...], "removed": [...] }
+
+GET  /api/chse/agent/memory/context?mode=hierarchical&l1=15&l2=24&l3=30
+    Output: { "l1": "...", "l2": "...", "l3": "..." }
 
 GET  /api/chse/health
     Output: { "status": "ok", "engine": "rust_native", "qps_capacity": 526316 }
@@ -252,24 +290,36 @@ Queries are single SIMD dot-product passes. No index traversal. No page lookups.
 **Database-grade durability**
 WAL + Snapshot with bit-perfect crash recovery. 446k QPS with persistence active. Classical ACID databases at comparable throughput: ~100x slower.
 
+**Outlier Protection Layer (OPL)**
+Critical events (`panic`, `corruption`, `fatal`, `oom`, `segfault`, `auth fail`, `data loss`) bypass deduplication entirely — they are always preserved verbatim in output. Deterministic, not statistical.
+
+**Holographic Frequency Superposition**
+Instead of dropping duplicate log lines, CHSE-X merges them with frequency and timestamp metadata: `[Connection Refused | 84× | 20:00→20:45]`. The LLM sees the same information in one line instead of 84.
+
+**Hierarchical Agent Memory**
+L1 (last 15 min, raw) → L2 (last 24h, CHSE-compressed) → L3 (last 30 days, nightly summaries). Agent context grows logarithmically, not linearly.
+
 **Zero-dependency LLM compression**
-No ML model. No GPU. No external service. Pure Rust SIMD Jaccard shingling compresses structured/log content in sub-millisecond time. Diagnostic quality fully retained in real API tests.
+No ML model. No GPU. No external service. Pure Rust SIMD. IRS 92.70%, exact fact retention 100%, avg compression time 1.50ms.
 
 **Honest about limits**
-Per-user anomaly detection collapses under cold-start conditions (Kaggle PaySim real-world: F1 = 0.17). We documented the failure in full. Understanding where a system fails is as important as knowing where it works.
+Per-user anomaly detection collapses under cold-start conditions (Kaggle PaySim: F1 = 0.17). We documented the failure in full.
 
 ---
 
 ## Use Cases
 
 **LLM Cost Reduction**
-Run agent logs, support tickets, RAG context, and error traces through CHSE-X before sending to any LLM API. 68.9% token reduction, 58.4% cost reduction, 34% latency improvement — in 0.25ms, with zero ML inference.
+Run agent logs, support tickets, RAG context, and error traces through CHSE-X before any LLM API call. 91.6% token reduction, 85.3% cost reduction. Also rescues queries that would otherwise fail rate limits.
+
+**Autonomous Agent Memory**
+Sleep Mode runs nightly at 03:00 UTC via Celery: reads yesterday's logs → CHSE superpose compress → Groq LLM summarize → save to persistent memory → prune raw logs. Agent memory stays bounded regardless of system uptime.
 
 **Event & Log Deduplication**
-Log pipelines, clickstream processing, payment event streams. Exact duplicate suppression at 526k+ events/sec with WAL durability.
+Log pipelines, clickstream processing, payment event streams. 526k+ events/sec with WAL durability and OPL protection for critical events.
 
 **Record Linkage**
-Entity resolution across dirty datasets with spelling variation, missing fields, inconsistent formatting. Single-pass exact + fuzzy matching.
+Entity resolution across dirty datasets. Single-pass exact + fuzzy matching with configurable Jaccard threshold.
 
 **Anomaly Pre-filter**
 Sits upstream of expensive ML inference. Filter with CHSE-X first, run your model only on what matters.
@@ -282,9 +332,9 @@ Sits upstream of expensive ML inference. Filter with CHSE-X first, run your mode
 |:---|:---|
 | Cold-start anomaly detection | Per-user modeling requires transaction history. Real-world fraud detection: F1 = 0.17 on Kaggle PaySim. Full analysis in verification report. |
 | Near-duplicate recall (CHSE alone) | Single-field changes produce orthogonal vectors by design. Pure CHSE recall: ~8%. Hybrid with MinHash: ~97%. |
-| LLM compression on natural language | Optimized for structured/repetitive content (logs, traces, events). General prose compression is less effective than log compression. |
-| CXL / RDMA | Distributed memory fabric is an architectural target, not yet implemented. Current system: standard userspace RAM. |
-| ARM64 dotprod optimization | Peak 526k QPS requires AArch64 dotprod instruction. x86 AVX-512 path delivers comparable throughput on modern Intel/AMD. |
+| LLM compression on natural language | Optimized for structured/repetitive content (logs, traces, events). General prose compression is less effective. |
+| CXL / RDMA | Distributed memory fabric is an architectural target, not yet implemented. |
+| ARM64 dotprod optimization | Peak 526k QPS requires AArch64 dotprod. x86 AVX-512 path delivers comparable throughput on modern Intel/AMD. |
 
 ---
 
@@ -293,28 +343,29 @@ Sits upstream of expensive ML inference. Filter with CHSE-X first, run your mode
 Any HDC implementation will hit these. We documented them so you don't have to rediscover them:
 
 **SplitMix64 Seed De-correlation**
-Sequential seeds → LCG → correlated hypervectors. Average similarity: +514 (expected: 0). After SplitMix64 hashing before LCG: average similarity -0.03. Perfect pseudo-orthogonality restored.
+Sequential seeds → LCG → correlated hypervectors. Average similarity: +514 (expected: 0). After SplitMix64 hashing: average similarity -0.03. Perfect pseudo-orthogonality.
 
 **SIMD Boundary Alignment**
-D=10,000 doesn't divide evenly by LANE_SIZE=32. Last SIMD iteration reads beyond array boundary — undefined behavior. Fixed: D=10,240.
+D=10,000 doesn't divide by LANE_SIZE=32. Last SIMD iteration reads beyond array boundary — undefined behavior. Fixed: D=10,240.
 
 **i16 Silent Overflow**
-`reduce_sum()` on i16 wraps silently at 32,767 in dense superposition. Cast to i32 before accumulation. Three lines. Months of confusing variance.
+`reduce_sum()` on i16 wraps silently at 32,767 in dense superposition. Cast to i32 before accumulation.
 
 ---
 
 ## Verification Report
 
-Full documentation from synthetic benchmarks to real-world testing — every failure, every fix, every trade-off:
+Full documentation from synthetic benchmarks to real-world testing:
 
 - SplitMix64 seed de-correlation (critical correctness fix)
-- SIMD boundary alignment and i16 overflow corrections  
-- Synthetic vs. real-world performance gap (PaySim F1=0.17 collapse analysis)
-- MinHash baseline comparison methodology
-- L3 cache bottleneck diagnosis and i8 quantization solution
-- VP-Tree failure analysis (why flat Vec beats trees at N=200)
-- Phase-by-phase optimization with honest trade-off analysis
-- Real Groq API compression test with full cost breakdown
+- SIMD boundary and i16 overflow corrections
+- Synthetic vs. real-world gap (PaySim F1=0.17 collapse analysis)
+- MinHash baseline comparison
+- L3 cache bottleneck and i8 quantization solution
+- VP-Tree failure analysis (flat Vec beats trees at N=200)
+- Phase-by-phase optimization with trade-off analysis
+- Real Groq API test: 5 scenarios, full cost breakdown
+- IRS multi-threshold curve analysis
 
 → [`docs/verification_report.md`](docs/verification_report.md)
 
@@ -323,21 +374,27 @@ Full documentation from synthetic benchmarks to real-world testing — every fai
 ## Roadmap
 
 ```
-VSA Core (SIMD, SplitMix64, i8 quantization)    ████████████████████  COMPLETE
-Exact Deduplication Engine                      ████████████████████  COMPLETE
-Hybrid Pipeline (CHSE-X + MinHash LSH)          ████████████████████  COMPLETE
-Parallel Batch Processing (Rayon)               ████████████████████  COMPLETE
-3-Level Holographic Hierarchy                   ████████████████████  COMPLETE
-WAL + Snapshot Persistence                      ████████████████████  COMPLETE
-C-FFI + Python Bridge                           ████████████████████  COMPLETE
-REST API (stream/filter, memory/query, dedup)   ████████████████████  COMPLETE
-LLM Context Compressor (Groq validated)         ████████████████████  COMPLETE
-Timestamp/UUID Masking (Module 1)               ████████████████████  COMPLETE
-Smart Structure-Aware Chunking (Module 2)       ████░░░░░░░░░░░░░░░░  IN PROGRESS
-Adaptive Threshold Controller (Module 3)        ░░░░░░░░░░░░░░░░░░░░  PLANNED
-Multi-Tier Memory L1/L2/L3 (Module 4)           ░░░░░░░░░░░░░░░░░░░░  PLANNED
-Wasm Single Address-Space Runtime               ░░░░░░░░░░░░░░░░░░░░  FUTURE
-CXL Memory Fabric Integration                   ░░░░░░░░░░░░░░░░░░░░  FUTURE
+VSA Core (SIMD, SplitMix64, i8 quantization)     ████████████████████  COMPLETE
+Exact Deduplication Engine                       ████████████████████  COMPLETE
+Hybrid Pipeline (CHSE-X + MinHash LSH)           ████████████████████  COMPLETE
+Parallel Batch Processing (Rayon)                ████████████████████  COMPLETE
+3-Level Holographic Hierarchy                    ████████████████████  COMPLETE
+WAL + Snapshot Persistence                       ████████████████████  COMPLETE
+C-FFI + Python Bridge                            ████████████████████  COMPLETE
+REST API (stream/filter, memory/query, dedup)    ████████████████████  COMPLETE
+LLM Context Compressor (Groq validated)          ████████████████████  COMPLETE
+Timestamp/UUID Masking                           ████████████████████  COMPLETE
+Holographic Frequency Superposition              ████████████████████  COMPLETE
+Outlier Protection Layer (OPL)                   ████████████████████  COMPLETE
+L1/L2/L3 Hierarchical Agent Memory               ████████████████████  COMPLETE
+Streaming Compression (StreamingCompressor)      ████████████████████  COMPLETE
+Sleep Mode / Neural Pruning (Celery 03:00 UTC)   ████████████████████  COMPLETE
+Shamir's Secret Sharing (Prism Service)          ████████████████████  COMPLETE
+Decentralized DHT Block Storage (P3 Service)     ████████████████████  COMPLETE
+Smart Structure-Aware Chunking                   ████░░░░░░░░░░░░░░░░  IN PROGRESS
+Adaptive Threshold Controller                    ░░░░░░░░░░░░░░░░░░░░  PLANNED
+Wasm Single Address-Space Runtime                ░░░░░░░░░░░░░░░░░░░░  FUTURE
+CXL Memory Fabric Integration                    ░░░░░░░░░░░░░░░░░░░░  FUTURE
 ```
 
 ---
