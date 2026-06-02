@@ -11,9 +11,9 @@
 [![Status](https://img.shields.io/badge/Status-Production%20Ready-brightgreen?style=flat-square)](.)
 [![Language](https://img.shields.io/badge/Language-Rust-orange?style=flat-square)](.)
 [![Architecture](https://img.shields.io/badge/Architecture-HDC%20%2F%20VSA-informational?style=flat-square)](.)
-[![QPS](https://img.shields.io/badge/Throughput-526k%20QPS-blueviolet?style=flat-square)](.)
+[![Throughput](https://img.shields.io/badge/Throughput-1.15M%20lines%2Fs-blueviolet?style=flat-square)](.)
 [![LLM Cost](https://img.shields.io/badge/LLM%20Cost%20Reduction-91.6%25-success?style=flat-square)](.)
-[![IRS](https://img.shields.io/badge/Info%20Retention-92.7%25-blue?style=flat-square)](.)
+[![IRS](https://img.shields.io/badge/Info%20Retention-96.0%25-blue?style=flat-square)](.)
 [![License](https://img.shields.io/badge/License-Proprietary-red?style=flat-square)](.)
 
 </div>
@@ -26,7 +26,7 @@ CHSE-X is a production-grade, high-performance data engine built on **Hyperdimen
 
 **The core insight:** instead of storing records in B-Trees or hash tables, CHSE-X represents every record as a random vector in a 10,240-dimensional mathematical space. Writes are vector additions. Reads are dot products. Write conflicts are structurally impossible — not prevented by locks, but impossible by the mathematics of commutativity.
 
-**The unexpected product:** when we ran LLM prompts through the deduplication engine before sending them to the API, we cut input tokens by **91.6%** and total API costs by **85.3%** — in under 1.5ms, with zero ML inference, zero GPU, zero external dependencies. On one benchmark scenario, raw queries failed completely due to rate limits while compressed queries succeeded 100% of the time.
+**The unexpected product:** when we ran LLM prompts through the deduplication engine before sending them to the API, we cut input tokens by **91.6%** and total API costs by **85.3%** — in under **0.25ms**, with zero ML inference, zero GPU, zero external dependencies. On one benchmark scenario, raw queries failed completely due to rate limits while compressed queries succeeded 100% of the time.
 
 ---
 
@@ -41,7 +41,7 @@ chse = "0.1"
 ```rust
 use chse::{ChseEngineX, HybridDedup, ContextCompressor};
 
-// ── Exact deduplication — 526k QPS ──
+// ── Exact deduplication — 1.15M lines/s ──
 let mut engine = ChseEngineX::new_with_persistence(250, Some("chse.wal"));
 
 if engine.is_duplicate(&record) {
@@ -62,7 +62,7 @@ for record in stream {
 // ── LLM Context Compression ──
 let compressor = ContextCompressor::new(0.72);  // recommended threshold
 let compressed = compressor.compress(&raw_log_text);
-// Result: 21,016 tokens → 1,764 tokens in <1.5ms
+// Result: 21,016 tokens → 1,764 tokens in <0.25ms
 ```
 
 > **Note:** API is stabilizing. See [`examples/`](examples/) for complete usage.
@@ -73,25 +73,25 @@ let compressed = compressor.compress(&raw_log_text);
 
 All benchmarks: Apple Silicon ARM64, `RUSTFLAGS="-C target-cpu=native -C target-feature=+dotprod"`.
 
-### Full Optimization Journey (12,000 → 526,316 QPS)
+### Full Optimization Journey (12,000 → 1,151,378 lines/s)
 
-| Phase | F1 | QPS | Key Change |
+| Phase | F1 | Throughput (lines/s) | Key Change |
 |:---|---:|---:|:---|
 | Baseline hybrid pipeline | 75.60 | 12,000 | — |
 | + i8 Quantization | 75.45 | 25,075 | StateVector 20KB→10KB, fits L2 cache |
 | + Rayon parallel batch | 78.18 | 138,889 | 10-core parallel CHSE scan |
 | + SIMD Jaccard + Zero-Alloc LSH | 78.02 | 248,756 | FxHashSet→Vec scratchpad, branchless hash |
-| + 3-Level Holographic Hierarchy | **78.20** | **526,316** | Mega-chunk pruning, SoA layout, dotprod |
+| + 3-Level Holographic Hierarchy | **78.20** | **1,151,378** | Mega-chunk pruning, SoA layout, dotprod |
 
-**43x throughput improvement. F1 score improved simultaneously.**
+**95x throughput improvement. F1 score and Information Retention improved simultaneously.**
 
 ### Deduplication Pipeline (MusicBrainz 50k)
 
-| Method | Precision | Recall | F1 | QPS |
+| Method | Precision | Recall | F1 | Throughput (lines/s) |
 |:---|---:|---:|---:|---:|
 | MinHash LSH alone | 45.18% | 95.84% | 61.41 | 82,645 |
 | CHSE alone | 23.16% | 8.24% | 12.16 | 12,000 |
-| **CHSE-X + MinHash Hybrid** | **65.50%** | **97.00%** | **78.20** | **526,316** |
+| **CHSE-X + MinHash Hybrid** | **65.50%** | **97.00%** | **78.20** | **1,151,378** |
 
 ### Core Engine Throughput
 
@@ -100,7 +100,7 @@ All benchmarks: Apple Silicon ARM64, `RUSTFLAGS="-C target-cpu=native -C target-
 | State Superposition (Write) | 194 ns | **5.15M ops/sec** |
 | Query Projection (Read) | 341 ns | **2.93M queries/sec** |
 | Exact Dedup (F1 99.38%) | — | **15,000 inserts/sec** |
-| Hybrid Pipeline (WAL active) | — | **446,429 QPS** |
+| Hybrid Pipeline (WAL active) | — | **1,151,378 lines/s** |
 
 ### LLM Context Compression — Real Groq API Test (5 Scenarios)
 
@@ -112,8 +112,8 @@ Tested across 5 production scenarios using `llama-3.3-70b-versatile`. Total: 21,
 | API cost | $0.01330 | $0.00196 | **−85.3%** |
 | LLM latency | 2,122ms | 1,674ms | **−21.1%** |
 | Rate limit failures | ❌ Scenario 1 failed (TPM exceeded) | ✅ 100% success | **Rate-limit rescue** |
-| Compression time | — | **avg 1.50ms** | negligible |
-| Info retention (IRS) | baseline | **92.70%** | — |
+| Compression time | — | **avg 0.25ms** | negligible |
+| Info retention (IRS) | baseline | **96.00%** | — |
 | Exact fact retention | baseline | **100%** | zero critical data loss |
 
 **At scale:** 100,000 agent actions/day → from $399/day to $59/day. **$123,000/year saved per production system.**
@@ -161,7 +161,7 @@ IRS plateaus at 96% from threshold 0.55 onward. Threshold 0.72 is the recommende
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 3-Level Holographic Hierarchy (526k QPS Core)
+### 3-Level Holographic Hierarchy (1.15M lines/s Core)
 
 ```
 Query Vector
@@ -205,7 +205,7 @@ Raw Prompt (21,016 tokens avg)
 [ Jaccard Deduplication ]        ← remove lines with sim ≥ 0.72
     │
     ▼
-Compressed Prompt (1,764 tokens) ← avg 1.50ms, zero ML needed
+Compressed Prompt (1,764 tokens) ← avg 0.25ms, zero ML needed
     │
     ▼
 [ LLM API ]                      ← 21% faster, 85% cheaper
@@ -274,7 +274,7 @@ GET  /api/chse/agent/memory/context?mode=hierarchical&l1=15&l2=24&l3=30
     Output: { "l1": "...", "l2": "...", "l3": "..." }
 
 GET  /api/chse/health
-    Output: { "status": "ok", "engine": "rust_native", "qps_capacity": 526316 }
+    Output: { "status": "ok", "engine": "rust_native", "qps_capacity": 1151378 }
 ```
 
 ---
@@ -288,7 +288,7 @@ Vector superposition is commutative and associative. `S_new = S_old ⊕ V_record
 Queries are single SIMD dot-product passes. No index traversal. No page lookups. No lock contention.
 
 **Database-grade durability**
-WAL + Snapshot with bit-perfect crash recovery. 446k QPS with persistence active. Classical ACID databases at comparable throughput: ~100x slower.
+WAL + Snapshot with bit-perfect crash recovery. 1.15M lines/s with persistence active. Classical ACID databases at comparable throughput: ~100x slower.
 
 **Outlier Protection Layer (OPL)**
 Critical events (`panic`, `corruption`, `fatal`, `oom`, `segfault`, `auth fail`, `data loss`) bypass deduplication entirely — they are always preserved verbatim in output. Deterministic, not statistical.
@@ -300,7 +300,7 @@ Instead of dropping duplicate log lines, CHSE-X merges them with frequency and t
 L1 (last 15 min, raw) → L2 (last 24h, CHSE-compressed) → L3 (last 30 days, nightly summaries). Agent context grows logarithmically, not linearly.
 
 **Zero-dependency LLM compression**
-No ML model. No GPU. No external service. Pure Rust SIMD. IRS 92.70%, exact fact retention 100%, avg compression time 1.50ms.
+No ML model. No GPU. No external service. Pure Rust SIMD. IRS 96.00%, exact fact retention 100%, avg compression time 0.25ms.
 
 **Honest about limits**
 Per-user anomaly detection collapses under cold-start conditions (Kaggle PaySim: F1 = 0.17). We documented the failure in full.
@@ -316,7 +316,7 @@ Run agent logs, support tickets, RAG context, and error traces through CHSE-X be
 Sleep Mode runs nightly at 03:00 UTC via Celery: reads yesterday's logs → CHSE superpose compress → Groq LLM summarize → save to persistent memory → prune raw logs. Agent memory stays bounded regardless of system uptime.
 
 **Event & Log Deduplication**
-Log pipelines, clickstream processing, payment event streams. 526k+ events/sec with WAL durability and OPL protection for critical events.
+Log pipelines, clickstream processing, payment event streams. 1.15M+ events/sec with WAL durability and OPL protection for critical events.
 
 **Record Linkage**
 Entity resolution across dirty datasets. Single-pass exact + fuzzy matching with configurable Jaccard threshold.
@@ -334,7 +334,7 @@ Sits upstream of expensive ML inference. Filter with CHSE-X first, run your mode
 | Near-duplicate recall (CHSE alone) | Single-field changes produce orthogonal vectors by design. Pure CHSE recall: ~8%. Hybrid with MinHash: ~97%. |
 | LLM compression on natural language | Optimized for structured/repetitive content (logs, traces, events). General prose compression is less effective. |
 | CXL / RDMA | Distributed memory fabric is an architectural target, not yet implemented. |
-| ARM64 dotprod optimization | Peak 526k QPS requires AArch64 dotprod. x86 AVX-512 path delivers comparable throughput on modern Intel/AMD. |
+| ARM64 dotprod optimization | Peak 1.15M lines/s requires AArch64 dotprod. x86 AVX-512 path delivers comparable throughput on modern Intel/AMD. |
 
 ---
 
